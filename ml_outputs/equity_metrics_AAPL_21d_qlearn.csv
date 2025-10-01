@@ -1,0 +1,2 @@
+symbol,horizon_days,model,episodes,test_start,test_end,final_buy_and_hold,final_strategy,buy_and_hold_Sharpe,buy_and_hold_MaxDrawdown,strategy_Sharpe,strategy_MaxDrawdown,direction_accuracy
+AAPL,21,qlearn,15,2022-09-19,2025-08-21,34863.43729150449,5.826837464050582,3.860536645831049,-0.9898600562117162,1.2853077679305849,-0.9115661568414715,0.16348773841961853

@@ -1,20 +1,24 @@
+# build_indicators_mysql.py
 import os
 import math
 import warnings
 from datetime import date
 from typing import Optional, List
 
+import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from sqlalchemy import create_engine, text
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Update DB_URL as needed
-DB_URL = os.getenv("DB_URL", "mysql+pymysql://root:578797@localhost:3306/marketdata?charset=utf8mb4")
+# ---- DB URL (override via env var DB_URL) -----------------------------------
+DB_URL = os.getenv(
+    "DB_URL",
+    "mysql+pymysql://root:578797@localhost:3306/marketdata?charset=utf8mb4",
+)
 engine = create_engine(DB_URL, future=True)
 
-# ----------------------------- DDL ---------------------------------
+# ---- DDL: indicators table (with forward returns) ---------------------------
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS indicators_daily (
   symbol        VARCHAR(16) NOT NULL,
@@ -46,18 +50,21 @@ CREATE TABLE IF NOT EXISTS indicators_daily (
 
 INDEX_SQLS = [
     "CREATE INDEX idx_indicators_date ON indicators_daily (trade_date)",
-    "CREATE INDEX idx_indicators_symbol_date ON indicators_daily (symbol, trade_date)"
+    "CREATE INDEX idx_indicators_symbol_date ON indicators_daily (symbol, trade_date)",
 ]
 
 UPSERT_SQL = """
 INSERT INTO indicators_daily (
-  symbol, trade_date, sma20, sma50, sma200, ema12, ema26,
+  symbol, trade_date,
+  sma20, sma50, sma200, ema12, ema26,
   macd, macd_signal, macd_hist, rsi14, atr14,
   bb_mid, bb_upper, bb_lower,
   adx14, di_plus, di_minus,
-  stoch_k, stoch_d, obv
+  stoch_k, stoch_d, obv,
+  fwd_ret_21, fwd_ret_63, fwd_ret_126
 ) VALUES (
-  :symbol, :trade_date, :sma20, :sma50, :sma200, :ema12, :ema26,
+  :symbol, :trade_date,
+  :sma20, :sma50, :sma200, :ema12, :ema26,
   :macd, :macd_signal, :macd_hist, :rsi14, :atr14,
   :bb_mid, :bb_upper, :bb_lower,
   :adx14, :di_plus, :di_minus,
@@ -73,6 +80,86 @@ ON DUPLICATE KEY UPDATE
   stoch_k=VALUES(stoch_k), stoch_d=VALUES(stoch_d), obv=VALUES(obv);
 """
 
+# -----------------------------------------------------------------------------
+# Helper: Wilder smoothing (EMA with alpha = 1/length)
+def wilder_smooth(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(alpha=1.0 / length, adjust=False).mean()
+
+# Indicators implemented in numpy/pandas only
+def compute_sma(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(length, min_periods=length).mean()
+
+def compute_ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+def compute_macd(close: pd.Series, fast=12, slow=26, signal=9):
+    ema_fast = compute_ema(close, fast)
+    ema_slow = compute_ema(close, slow)
+    macd = ema_fast - ema_slow
+    macd_signal = compute_ema(macd, signal)
+    macd_hist = macd - macd_signal
+    return macd, macd_signal, macd_hist
+
+def compute_rsi(close: pd.Series, length=14):
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = wilder_smooth(gain, length)
+    avg_loss = wilder_smooth(loss, length)
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, length=14):
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low),
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = wilder_smooth(tr, length)
+    return atr
+
+def compute_bbands(close: pd.Series, length=20, nstd=2.0):
+    mid = close.rolling(length, min_periods=length).mean()
+    std = close.rolling(length, min_periods=length).std(ddof=0)
+    upper = mid + nstd * std
+    lower = mid - nstd * std
+    return mid, upper, lower
+
+def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, length=14):
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = pd.Series(plus_dm, index=high.index)
+    minus_dm = pd.Series(minus_dm, index=high.index)
+
+    tr = compute_atr(high, low, close, length=1)  # true range (not smoothed)
+    tr_s = wilder_smooth(tr, length)
+    plus_dm_s = wilder_smooth(plus_dm, length)
+    minus_dm_s = wilder_smooth(minus_dm, length)
+
+    di_plus = 100 * (plus_dm_s / tr_s.replace(0, np.nan))
+    di_minus = 100 * (minus_dm_s / tr_s.replace(0, np.nan))
+    dx = ( (di_plus - di_minus).abs() / (di_plus + di_minus).replace(0, np.nan) ) * 100
+    adx = wilder_smooth(dx, length)
+    return adx, di_plus, di_minus
+
+def compute_stoch(high: pd.Series, low: pd.Series, close: pd.Series, k=14, d=3, smooth_k=3):
+    lowest = low.rolling(k, min_periods=k).min()
+    highest = high.rolling(k, min_periods=k).max()
+    raw_k = 100 * (close - lowest) / (highest - lowest)
+    stoch_k = raw_k.rolling(smooth_k, min_periods=smooth_k).mean()
+    stoch_d = stoch_k.rolling(d, min_periods=d).mean()
+    return stoch_k, stoch_d
+
+def compute_obv(close: pd.Series, volume: pd.Series):
+    sign = np.sign(close.diff().fillna(0))
+    return (volume * sign).cumsum()
+
+
+# -----------------------------------------------------------------------------
 def ensure_schema():
     with engine.begin() as conn:
         conn.exec_driver_sql(SCHEMA_SQL)
@@ -80,32 +167,26 @@ def ensure_schema():
             try:
                 conn.exec_driver_sql(stmt)
             except Exception as e:
-                msg = str(e).lower()
-                if "duplicate key name" in msg or "1061" in msg:
+                if "1061" in str(e) or "duplicate key name" in str(e).lower():
                     pass
                 else:
                     raise
 
-# ------------------------- Helpers ---------------------------------
-def get_symbols() -> List[str]:
-    """Get symbols that have data in daily_bars."""
+def list_symbols() -> List[str]:
     with engine.begin() as conn:
-        sql = "SELECT DISTINCT symbol FROM daily_bars"
-        return [r[0] for r in conn.execute(text(sql)).fetchall()]
+        rows = conn.execute(text("SELECT DISTINCT symbol FROM daily_bars")).fetchall()
+    return [r[0] for r in rows]
 
-def get_start_date_for_symbol(symbol: str, fallback_start: str) -> str:
-    """Incremental: continue from last computed date + 1 or fallback_start if no records."""
+def last_indicator_date(symbol: str) -> Optional[pd.Timestamp]:
     with engine.begin() as conn:
-        row = conn.execute(
+        d = conn.execute(
             text("SELECT MAX(trade_date) FROM indicators_daily WHERE symbol=:s"),
-            {"s": symbol}
+            {"s": symbol},
         ).scalar()
-    if row is None:
-        return fallback_start
-    return (pd.to_datetime(row) + pd.Timedelta(days=1)).date().isoformat()
+    return None if d is None else pd.to_datetime(d)
 
-def read_price_slice(symbol: str, start_date: str, end_date: Optional[str] = None) -> pd.DataFrame:
-    end_date = end_date or date.today().isoformat()
+def read_prices(symbol: str, start: str, end: Optional[str]) -> pd.DataFrame:
+    end = end or date.today().isoformat()
     sql = """
       SELECT trade_date, `open`, high, low, `close`, volume
       FROM daily_bars
@@ -113,88 +194,53 @@ def read_price_slice(symbol: str, start_date: str, end_date: Optional[str] = Non
       ORDER BY trade_date
     """
     with engine.begin() as conn:
-        df = pd.read_sql(text(sql), conn, params={"s": symbol, "start": start_date, "end": end_date})
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+        df = pd.read_sql(text(sql), conn, params={"s": symbol, "start": start, "end": end})
+    if df.empty:
+        return df
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
     for c in ["open", "high", "low", "close"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
-    return df
+    return df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
 
-# ------------------------- Indicator Calculation -------------------------
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
+    out = pd.DataFrame(index=df.index)
+    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
 
-    df_i = df.copy()
-    # SMA and EMA
-    df_i["sma20"]  = ta.sma(df_i["close"], length=20)
-    df_i["sma50"]  = ta.sma(df_i["close"], length=50)
-    df_i["sma200"] = ta.sma(df_i["close"], length=200)
+    out["sma20"]  = compute_sma(close, 20)
+    out["sma50"]  = compute_sma(close, 50)
+    out["sma200"] = compute_sma(close, 200)
+    out["ema12"]  = compute_ema(close, 12)
+    out["ema26"]  = compute_ema(close, 26)
 
-    df_i["ema12"]  = ta.ema(df_i["close"], length=12)
-    df_i["ema26"]  = ta.ema(df_i["close"], length=26)
+    macd, macds, macdh = compute_macd(close, 12, 26, 9)
+    out["macd"], out["macd_signal"], out["macd_hist"] = macd, macds, macdh
 
-    # MACD
-    macd = ta.macd(df_i["close"], fast=12, slow=26, signal=9)
-    if macd is not None:
-        df_i["macd"]        = macd.iloc[:, 0]
-        df_i["macd_signal"] = macd.iloc[:, 1]
-        df_i["macd_hist"]   = macd.iloc[:, 2]
+    out["rsi14"] = compute_rsi(close, 14)
+    out["atr14"] = compute_atr(high, low, close, 14)
 
-    # RSI
-    df_i["rsi14"] = ta.rsi(df_i["close"], length=14)
+    bb_mid, bb_upper, bb_lower = compute_bbands(close, 20, 2.0)
+    out["bb_mid"], out["bb_upper"], out["bb_lower"] = bb_mid, bb_upper, bb_lower
 
-    # ATR
-    df_i["atr14"] = ta.atr(df_i["high"], df_i["low"], df_i["close"], length=14)
+    adx, di_p, di_m = compute_adx(high, low, close, 14)
+    out["adx14"], out["di_plus"], out["di_minus"] = adx, di_p, di_m
 
-    # Bollinger Bands
-    def _bollinger(close, length=20, nstd=2.0):
-        try:
-            bb = ta.bbands(close, length=length, std=nstd)
-            if isinstance(bb, pd.DataFrame) and not bb.empty:
-                bb_lower = bb.filter(regex=r"^BBL_").iloc[:, 0]
-                bb_mid   = bb.filter(regex=r"^BBM_").iloc[:, 0]
-                bb_upper = bb.filter(regex=r"^BBU_").iloc[:, 0]
-                return bb_mid, bb_upper, bb_lower
-            raise ValueError("Empty bbands result")
-        except Exception:
-            mid = close.rolling(length).mean()
-            std = close.rolling(length).std(ddof=0)
-            upper = mid + nstd * std
-            lower = mid - nstd * std
-            return mid, upper, lower
+    st_k, st_d = compute_stoch(high, low, close, 14, 3, 3)
+    out["stoch_k"], out["stoch_d"] = st_k, st_d
 
-    df_i["bb_mid"], df_i["bb_upper"], df_i["bb_lower"] = _bollinger(df_i["close"], length=20, nstd=2.0)
+    out["obv"] = compute_obv(close, vol)
 
-    # ADX
-    adx = ta.adx(df_i["high"], df_i["low"], df_i["close"], length=14)
-    if adx is not None:
-        df_i["adx14"]   = adx.iloc[:, 0]
-        df_i["di_plus"] = adx.iloc[:, 1]
-        df_i["di_minus"]= adx.iloc[:, 2]
+    out.insert(0, "trade_date", df["trade_date"].dt.date)
+    return out
 
-    # Stochastic Oscillator
-    stoch = ta.stoch(df_i["high"], df_i["low"], df_i["close"], k=14, d=3, smooth_k=3)
-    if stoch is not None:
-        df_i["stoch_k"] = stoch.iloc[:, 0]
-        df_i["stoch_d"] = stoch.iloc[:, 1]
-
-    # OBV
-    df_i["obv"] = ta.obv(df_i["close"], df_i["volume"])
-
-    cols = [
-        "trade_date","sma20","sma50","sma200","ema12","ema26","macd","macd_signal","macd_hist",
-        "rsi14","atr14","bb_mid","bb_upper","bb_lower","adx14","di_plus","di_minus",
-        "stoch_k","stoch_d","obv"
-    ]
-    return df_i[cols]
-
-def upsert_indicators(symbol: str, df_i: pd.DataFrame):
-    if df_i.empty:
+def upsert(symbol: str, inds: pd.DataFrame, batch: int = 1000):
+    if inds.empty:
         return
-    records = []
-    for r in df_i.itertuples(index=False):
-        rec = dict(
+    recs = []
+    for r in inds.itertuples(index=False):
+        recs.append(dict(
             symbol=symbol,
             trade_date=r.trade_date,
             sma20=_nn(r.sma20),  sma50=_nn(r.sma50),  sma200=_nn(r.sma200),
@@ -205,39 +251,43 @@ def upsert_indicators(symbol: str, df_i: pd.DataFrame):
             adx14=_nn(r.adx14),  di_plus=_nn(r.di_plus), di_minus=_nn(r.di_minus),
             stoch_k=_nn(r.stoch_k), stoch_d=_nn(r.stoch_d),
             obv=None if pd.isna(r.obv) else int(r.obv),
-        )
-        records.append(rec)
+        ))
+        if len(recs) >= batch:
+            _flush(recs); recs.clear()
+    if recs:
+        _flush(recs)
+
+def _flush(records):
     with engine.begin() as conn:
         conn.execute(text(UPSERT_SQL), records)
 
 def _nn(x):
     return None if (x is None or (isinstance(x, float) and math.isnan(x))) else float(x)
 
-# ----------------------------- Main --------------------------------
-def build_indicators(start_if_new: str = "2015-09-23", end: Optional[str] = None, symbols: Optional[List[str]] = None):
+# -----------------------------------------------------------------------------
+def build_indicators(start_if_new="2015-09-23", end: Optional[str] = None, symbols: Optional[List[str]] = None):
     ensure_schema()
-    if symbols is None:
-        symbols = get_symbols()
-
-    for i, sym in enumerate(symbols, 1):
+    syms = symbols or list_symbols()
+    for i, sym in enumerate(syms, 1):
         try:
-            start = get_start_date_for_symbol(sym, start_if_new)
+            last = last_indicator_date(sym)
+            start = start_if_new if last is None else (pd.to_datetime(last) + pd.Timedelta(days=1)).date().isoformat()
             if end is not None and pd.to_datetime(end) < pd.to_datetime(start):
                 continue
-            print(f"[{i}/{len(symbols)}] {sym}  (from {start})")
-            px = read_price_slice(sym, start, end)
+            px = read_prices(sym, start, end)
+            print(f"[{i}/{len(syms)}] {sym}: rows={len(px)} from {start} -> {(end or date.today().isoformat())}")
             if px.empty:
                 continue
-            df_i = compute_indicators(px)
-            upsert_indicators(sym, df_i)
+            inds = compute_all_indicators(px)
+            upsert(sym, inds)
         except Exception as e:
             print(f"Error on {sym}: {e}")
-            continue
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="Build/update technical indicators into MySQL.")
-    ap.add_argument("--end", default=None, help="Optional end date (default=today)")
-    ap.add_argument("--symbols", nargs="*", default=None, help="Optional list of symbols to process")
+    ap = argparse.ArgumentParser(description="Compute indicators + forward returns (pure pandas/numpy) to MySQL.")
+    ap.add_argument("--start-if-new", default="2015-09-23", help="Start date for symbols without indicators")
+    ap.add_argument("--end", default=None, help="Optional end date YYYY-MM-DD")
+    ap.add_argument("--symbols", nargs="*", default=None, help="Optional subset of symbols")
     args = ap.parse_args()
-    build_indicators(start_if_new="2015-09-23", end=args.end, symbols=args.symbols)
+    build_indicators(start_if_new=args.start_if_new, end=args.end, symbols=args.symbols)
