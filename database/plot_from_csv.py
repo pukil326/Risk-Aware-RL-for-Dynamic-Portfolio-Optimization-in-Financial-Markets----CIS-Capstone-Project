@@ -86,7 +86,5 @@ def plot_performance_comparison(results_config, column_map, output_file):
     plt.show()
 
 if __name__ == "__main__":
-    # Before running, make sure you have matplotlib installed:
-    # pip install matplotlib
     
     plot_performance_comparison(RESULT_FILES, COLUMN_MAPPING, OUTPUT_IMAGE_FILE)
