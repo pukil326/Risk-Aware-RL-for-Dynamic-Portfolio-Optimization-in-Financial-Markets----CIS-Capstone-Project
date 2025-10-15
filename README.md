@@ -98,10 +98,4 @@ RSI, MACD, Stochastic Oscillator, Bollinger Bands, SMA/EMA, ADX, CCI, OBV, ROC, 
 
 ---
 
-##  Future Work
-- Extend to **multi-asset portfolios** and **risk-aware reward functions**.  
-- Integrate **transaction slippage** and **position sizing**.  
-- Experiment with **transformer-based RL agents** and **macro regime adaptation**.
-
----
 
