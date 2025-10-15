@@ -74,7 +74,6 @@ RSI, MACD, Stochastic Oscillator, Bollinger Bands, SMA/EMA, ADX, CCI, OBV, ROC, 
 - Generate **trading logs** showing for each day:
   - Date, Price, Action (Buy/Sell/Hold)
   - RL Agent Decision Probability
-  - Realized Log Return
   - Cumulative Portfolio Value  
 - Visualize **PnL curves** and **Sharpe ratio comparison charts**.
 
