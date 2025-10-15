@@ -12,7 +12,6 @@ RESULT_FILES = {
 }
 
 # --- Column names from your simulation files ---
-# These are the names of the portfolio value columns in your CSVs.
 COLUMN_MAPPING = {
     "DQN (Indicators)": "portfolio_value_DQN_Paper",
     "PPO (Indicators)": "portfolio_value_PPO_Paper",
