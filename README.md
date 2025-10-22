@@ -74,7 +74,6 @@ RSI, MACD, Stochastic Oscillator, Bollinger Bands, SMA/EMA, ADX, CCI, OBV, ROC, 
 - Generate **trading logs** showing for each day:
   - Date, Price, Action (Buy/Sell/Hold)
   - RL Agent Decision Probability
-  - Realized Log Return
   - Cumulative Portfolio Value  
 - Visualize **PnL curves** and **Sharpe ratio comparison charts**.
 
@@ -99,10 +98,4 @@ RSI, MACD, Stochastic Oscillator, Bollinger Bands, SMA/EMA, ADX, CCI, OBV, ROC, 
 
 ---
 
-##  Future Work
-- Extend to **multi-asset portfolios** and **risk-aware reward functions**.  
-- Integrate **transaction slippage** and **position sizing**.  
-- Experiment with **transformer-based RL agents** and **macro regime adaptation**.
-
----
 
