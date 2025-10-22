@@ -5,19 +5,35 @@ import matplotlib.pyplot as plt
 
 # --- Paths to your results files ---
 RESULT_FILES = {
-    "DQN (Indicators)": "output/ml_outputs_dqn_indicators/full_simulation_AAPL.csv",
-    "PPO (Indicators)": "output/ml_outputs_ppo_indicators/full_simulation_AAPL.csv",
-    "DQN (Raw Price)": "output/ml_outputs_dqn_raw_vs_ta/full_simulation_AAPL_21d.csv",
-    "PPO (Raw Price)": "output/ml_outputs_ppo_raw_vs_ta/full_simulation_AAPL_21d.csv",
+    #"DQN (Indicators)": "output/ml_outputs_dqn_indicators/full_simulation_AAPL.csv",
+    #"PPO (Indicators)": "output/ml_outputs_ppo_indicators/full_simulation_AAPL.csv",
+    #"DQN (Raw Price)": "output/ml_outputs_dqn_raw_vs_ta/full_simulation_AAPL_21d.csv",
+    #"PPO (Raw Price)": "output/ml_outputs_ppo_raw_vs_ta/full_simulation_AAPL_21d.csv",
+    #"DQN (TNN)": "ml_outputs_dqn_TNN/full_simulation_AAPL.csv",
+    #"A2C (Indicators)": "ml_outputs_a2c_indicators/full_simulation_AAPL.csv",
+    #"DQN (13train)":"ml_outputs_dqn_13train24test/full_simulation_AAPL.csv",
+    #"A2C (13train)":"ml_outputs_a2c_13train24test/full_simulation_AAPL.csv",
+    #"PPO (13train)":"ml_outputs_ppo_13train24test/full_simulation_AAPL.csv",
+    "DQN (monthly)":"ml_outputs_dqn_monthly/full_simulation_AAPL.csv",
+    "A2C (monthly)":"ml_outputs_a2c_monthly/full_simulation_AAPL.csv",
+    "PPO (monthly)":"ml_outputs_ppo_monthly/full_simulation_AAPL.csv"
 }
 
 # --- Column names from your simulation files ---
-# These are the names of the portfolio value columns in your CSVs.
 COLUMN_MAPPING = {
-    "DQN (Indicators)": "portfolio_value_DQN_Paper",
-    "PPO (Indicators)": "portfolio_value_PPO_Paper",
-    "DQN (Raw Price)": "portfolio_value_DQN_RawPrice",
-    "PPO (Raw Price)": "portfolio_value_PPO_RawPrice",
+    #"DQN (Indicators)": "portfolio_value_DQN_Paper",
+    #"PPO (Indicators)": "portfolio_value_PPO_Paper",
+    #"DQN (Raw Price)": "portfolio_value_DQN_RawPrice",
+    #"PPO (Raw Price)": "portfolio_value_PPO_RawPrice",
+    #"DQN (TNN)": "portfolio_value_DQN_Advanced",
+    #"A2C (Indicators)":"portfolio_value_A2C_Paper",
+    #"DQN (13train)":"portfolio_value_DQN_Advanced",
+    #"A2C (13train)":"portfolio_value_A2C_Advanced",
+    #"PPO (13train)":"portfolio_value_PPO_Advanced",
+    "DQN (monthly)":"portfolio_value_DQN_Advanced",
+    "A2C (monthly)":"portfolio_value_A2C_Advanced",
+    "PPO (monthly)":"portfolio_value_PPO_Advanced"
+    
 }
 
 
@@ -87,7 +103,5 @@ def plot_performance_comparison(results_config, column_map, output_file):
     plt.show()
 
 if __name__ == "__main__":
-    # Before running, make sure you have matplotlib installed:
-    # pip install matplotlib
     
     plot_performance_comparison(RESULT_FILES, COLUMN_MAPPING, OUTPUT_IMAGE_FILE)

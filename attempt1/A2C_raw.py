@@ -1,4 +1,4 @@
-import os, sys, warnings, random, collections
+import os, sys, warnings, random
 from typing import Tuple, Dict
 
 import numpy as np
@@ -12,7 +12,6 @@ np.random.seed(42); random.seed(42)
 
 import tensorflow as tf
 from keras import Input, Model
-from keras.models import Sequential
 from keras.layers import Dense
 from keras.optimizers import Adam
 from tqdm import trange
@@ -38,62 +37,69 @@ DB_URL = os.getenv(
 )
 DEFAULT_HORIZON = 21
 LOOKBACK_WINDOW = 60
-OUTDIR_DEFAULT = "ml_outputs_dqn_raw_vs_ta"
-# --- CHANGED: Set transaction cost to zero for a frictionless comparison ---
+OUTDIR_DEFAULT = "ml_outputs_a2c_raw_vs_ta"
 TRANSACTION_COST = 0.0
 
-# ========== DQN Agent ==========
-class DQNAgent:
-    def __init__(self, state_size: int, action_size: int = 2, gamma=0.95, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995, lr=0.001):
+# ========== A2C Agent ==========
+class A2CAgent:
+    def __init__(self, state_size: int, action_size: int = 2, gamma=0.99, lr=0.0001):
         self.state_size = state_size
         self.action_size = action_size
         self.gamma = gamma
-        self.epsilon = epsilon
-        self.epsilon_min = epsilon_min
-        self.epsilon_decay = epsilon_decay
         self.lr = lr
-        self.memory = collections.deque(maxlen=2000)
-        self.model = self._build_model()
-
-    def _build_model(self):
-        model = Sequential([
-            Input(shape=(self.state_size,)),
-            Dense(64, activation="relu"),
-            Dense(64, activation="relu"),
-            Dense(self.action_size, activation="linear"),
-        ])
-        model.compile(loss="mse", optimizer=Adam(learning_rate=self.lr))
-        return model
-
-    def remember(self, s, a, r, s_next, done):
-        self.memory.append((s, a, r, s_next, done))
-
-    def choose_action(self, state, greedy=False):
-        if (not greedy) and (np.random.rand() <= self.epsilon):
-            return np.random.randint(self.action_size)
-        q = self.model.predict(state, verbose=0)
-        return int(np.argmax(q[0]))
-
-    def replay(self, batch_size):
-        if len(self.memory) < batch_size:
-            return
         
-        minibatch = random.sample(self.memory, batch_size)
-        
-        states = np.vstack([s for (s, _, _, _, _) in minibatch])
-        next_states = np.vstack([ns for (_, _, _, ns, _) in minibatch])
-        
-        q_curr = self.model.predict(states, verbose=0)
-        q_next = self.model.predict(next_states, verbose=0)
+        self.actor = self._build_actor()
+        self.critic = self._build_critic()
+        self.actor_optimizer = Adam(learning_rate=self.lr)
+        self.critic_optimizer = Adam(learning_rate=self.lr)
 
-        for i, (_, a, r, _, done) in enumerate(minibatch):
-            target = r if done else r + self.gamma * np.max(q_next[i])
-            q_curr[i, a] = target
+    def _build_actor(self):
+        state_input = Input(shape=(self.state_size,))
+        dense1 = Dense(64, activation='relu')(state_input)
+        dense2 = Dense(64, activation='relu')(dense1)
+        action_probs = Dense(self.action_size, activation='softmax')(dense2)
+        return Model(inputs=state_input, outputs=action_probs)
 
-        self.model.fit(states, q_curr, epochs=1, verbose=0)
+    def _build_critic(self):
+        state_input = Input(shape=(self.state_size,))
+        dense1 = Dense(64, activation='relu')(state_input)
+        dense2 = Dense(64, activation='relu')(dense1)
+        state_value = Dense(1, activation=None)(dense2)
+        return Model(inputs=state_input, outputs=state_value)
+
+    def choose_action(self, state):
+        state = state[np.newaxis, :]
+        action_probs = self.actor.predict(state, verbose=0)[0]
+        action = np.random.choice(self.action_size, p=action_probs)
+        return action
+
+    def learn(self, state, action, reward, next_state, done):
+        state = state[np.newaxis, :]
+        next_state = next_state[np.newaxis, :]
         
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+        with tf.GradientTape() as tape_critic, tf.GradientTape() as tape_actor:
+            value = self.critic(state, training=True)
+            next_value = self.critic(next_state, training=True)
+            
+            target = reward + self.gamma * next_value * (1 - int(done))
+            advantage = target - value
+            
+            # Critic loss
+            critic_loss = tf.square(advantage)
+            
+            # Actor loss
+            action_probs = self.actor(state, training=True)
+            action_one_hot = tf.one_hot([action], self.action_size)
+            selected_action_prob = tf.reduce_sum(action_one_hot * action_probs)
+            log_prob = tf.math.log(selected_action_prob + 1e-10)
+            actor_loss = -log_prob * tf.stop_gradient(advantage)
+
+        critic_grads = tape_critic.gradient(critic_loss, self.critic.trainable_variables)
+        self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
+        
+        actor_grads = tape_actor.gradient(actor_loss, self.actor.trainable_variables)
+        self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
+
 
 # ========== Utilities ==========
 def load_and_prepare_data(engine, symbol: str, horizon: int, window_size: int) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray]:
@@ -134,8 +140,8 @@ def chrono_split_data(df, states, y, train_frac=0.7):
     return df_tr, X_tr, y_tr, df_te, X_te, y_te
 
 # ========== Main Runner ==========
-def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, episodes=50, outdir=OUTDIR_DEFAULT, batch_size=32):
-    print(f">>> DQN Agent (Raw Price) vs TA  Py={sys.executable}", flush=True)
+def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, episodes=50, outdir=OUTDIR_DEFAULT):
+    print(f">>> A2C Agent (Raw Price) vs TA  Py={sys.executable}", flush=True)
     print(f"[config] symbol={symbol} horizon={horizon} window={window_size} episodes={episodes}", flush=True)
 
     os.makedirs(outdir, exist_ok=True)
@@ -147,36 +153,29 @@ def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, epi
     print(f"[data] {symbol} train_samples={len(X_tr)} test_samples={len(X_te)}", flush=True)
 
     state_size = X_tr.shape[1]
-    agent = DQNAgent(state_size=state_size)
+    agent = A2CAgent(state_size=state_size)
 
     # -------- Training --------
-    print("[info] Starting DQN training...", flush=True)
-    n = len(X_tr)
+    print("[info] Starting A2C training...", flush=True)
     for ep in range(1, episodes + 1):
-        state = X_tr[0].reshape(1, -1)
-        prev_action = 0
         total_reward = 0.0
-        for t in trange(n - 1, desc=f"Episode {ep}/{episodes}"):
+        prev_action = 0
+        for t in trange(len(X_tr) - 1, desc=f"Episode {ep}/{episodes}"):
+            state, next_state = X_tr[t], X_tr[t+1]
             action = agent.choose_action(state)
-            next_state = X_tr[t+1].reshape(1, -1)
-            
             reward = (y_tr[t] if action == 1 else 0.0) - (TRANSACTION_COST if action != prev_action else 0.0)
-            done = t == n - 2
-
-            agent.remember(state, action, reward, next_state, done)
-            state = next_state
-            prev_action = action
+            done = t == len(X_tr) - 2
+            agent.learn(state, action, reward, next_state, done)
             total_reward += reward
-
-            agent.replay(batch_size)
-            
-        print(f"[train] ep={ep}/{episodes}  eps={agent.epsilon:.3f}  total_reward={total_reward:.4f}", flush=True)
+            prev_action = action
+        
+        print(f"[train] ep={ep}/{episodes} total_reward={total_reward:.4f}", flush=True)
 
     # -------- Evaluation --------
-    print("\n[info] Evaluating DQN agent on test data...", flush=True)
-    actions_dqn = np.zeros(len(X_te), dtype=int)
+    print("\n[info] Evaluating A2C agent on test data...", flush=True)
+    actions_a2c = np.zeros(len(X_te), dtype=int)
     for t in range(len(X_te)):
-        actions_dqn[t] = agent.choose_action(X_te[t].reshape(1, -1), greedy=True)
+        actions_a2c[t] = agent.choose_action(X_te[t])
     
     # --- TA baselines on the SAME test window ---
     def ta_actions_from_df(df: pd.DataFrame) -> Dict[str, np.ndarray]:
@@ -196,7 +195,7 @@ def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, epi
     sim_df = pd.DataFrame(index=df_te.index, data={'close_price': close_prices})
     
     ta_strats = ta_actions_from_df(df_te)
-    strategies = {'DQN_RawPrice': actions_dqn, **ta_strats, 'Buy_and_Hold': np.ones_like(actions_dqn)}
+    strategies = {'A2C_RawPrice': actions_a2c, **ta_strats, 'Buy_and_Hold': np.ones_like(actions_a2c)}
     initial_cash = close_prices[0]
 
     for name, acts in strategies.items():
@@ -211,7 +210,7 @@ def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, epi
             portfolio_values.append(cash + shares * price_today)
         sim_df[f'portfolio_value_{name}'] = portfolio_values
     
-    sim_df['pnl_DQN_RawPrice'] = sim_df['portfolio_value_DQN_RawPrice'] - initial_cash
+    sim_df['pnl_A2C_RawPrice'] = sim_df['portfolio_value_A2C_RawPrice'] - initial_cash
     sim_path = os.path.join(outdir, f"full_simulation_{symbol}_{horizon}d.csv")
     sim_df.to_csv(sim_path)
     print(f"[save] Full simulation log (with PnL) saved to: {sim_path}", flush=True)
@@ -233,18 +232,18 @@ def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, epi
     metrics_df.to_csv(metrics_path, index=False)
     print(f"[save] Performance metrics (with Sharpe Ratio) saved to: {metrics_path}", flush=True)
 
-    # --- Human-Readable Trading Log for DQN Agent ---
+    # --- Human-Readable Trading Log for A2C Agent ---
     trade_actions = []
-    if len(actions_dqn):
-        trade_actions.append("BUY" if actions_dqn[0] == 1 else "HOLD")
-        for i in range(1, len(actions_dqn)):
-            if actions_dqn[i-1] == 0 and actions_dqn[i] == 1: trade_actions.append("BUY")
-            elif actions_dqn[i-1] == 1 and actions_dqn[i] == 0: trade_actions.append("SELL")
+    if len(actions_a2c):
+        trade_actions.append("BUY" if actions_a2c[0] == 1 else "HOLD")
+        for i in range(1, len(actions_a2c)):
+            if actions_a2c[i-1] == 0 and actions_a2c[i] == 1: trade_actions.append("BUY")
+            elif actions_a2c[i-1] == 1 and actions_a2c[i] == 0: trade_actions.append("SELL")
             else: trade_actions.append("HOLD")
     
     log_df = pd.DataFrame({
         "close_price": close_prices,
-        "position": ["LONG" if a == 1 else "FLAT" for a in actions_dqn],
+        "position": ["LONG" if a == 1 else "FLAT" for a in actions_a2c],
         "action": trade_actions
     }, index=df_te.index)
     
@@ -257,7 +256,7 @@ def run(symbol="AAPL", horizon=DEFAULT_HORIZON, window_size=LOOKBACK_WINDOW, epi
 # ========== CLI ==========
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="DQN Trading Agent (Raw Price) vs TA Baselines")
+    ap = argparse.ArgumentParser(description="A2C Trading Agent (Raw Price) vs TA Baselines")
     ap.add_argument("--symbol", default="AAPL")
     ap.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
     ap.add_argument("--window", type=int, default=LOOKBACK_WINDOW)
@@ -265,4 +264,3 @@ if __name__ == "__main__":
     ap.add_argument("--outdir", default=OUTDIR_DEFAULT)
     args = ap.parse_args()
     run(symbol=args.symbol, horizon=args.horizon, window_size=args.window, episodes=args.episodes, outdir=args.outdir)
-
